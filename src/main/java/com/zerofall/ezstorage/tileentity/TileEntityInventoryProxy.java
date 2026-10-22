@@ -9,13 +9,22 @@ import com.zerofall.ezstorage.util.EZInventory;
 
 public class TileEntityInventoryProxy extends TileEntityMultiblock implements ISidedInventory {
 
+    /**
+     * {@link #getAccessibleSlotsFromSide(int)} used to allocate a fresh {@code int[types]} (up to 65k entries) on
+     * every single call, which hoppers/pipes do several times per tick. Rebuilt only when the storage structure
+     * changes.
+     */
+    private int[] cachedSlots;
+    private int cachedStructureVersion = -1;
+    private int cachedSlotCount = -1;
+
     @Override
     public int getSizeInventory() {
         EZInventory inventory = getInventory();
         if (inventory == null) {
             return 1;
         }
-        int size = inventory.inventory.size();
+        int size = inventory.slotCount();
         if (inventory.getTotalCount() < inventory.maxItems
             && (EZConfiguration.maxItemTypes == 0 || inventory.slotCount() < EZConfiguration.maxItemTypes)) {
             size += 1;
@@ -26,8 +35,8 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
     @Override
     public ItemStack getStackInSlot(int index) {
         EZInventory inventory = getInventory();
-        if (inventory != null && index < inventory.inventory.size()) {
-            return inventory.inventory.get(index);
+        if (inventory != null) {
+            return inventory.getStackAt(index);
         }
         return null;
     }
@@ -38,8 +47,12 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
         if (inventory == null) {
             return null;
         }
+        // No sendToClients() here: the inventory records the change itself and the container syncs it once per tick.
+        // Re-sending the whole inventory per transferred stack is what made pipes crawl.
         ItemStack result = inventory.getItemStackAt(index, count);
-        getCore().updateTileEntity();
+        if (result != null) {
+            markStorageChanged();
+        }
         return result;
     }
 
@@ -49,15 +62,21 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
         if (inventory == null) {
             return;
         } else if (stack == null || stack.stackSize == 0) {
-            inventory.inventory.remove(index);
-        } else if (index >= inventory.inventory.size()) {
+            inventory.setStackAt(index, null);
+        } else if (index >= inventory.slotCount()) {
             inventory.input(stack);
         } else if (isItemValidForSlot(index, stack)) {
-            inventory.inventory.set(index, stack);
-        } else {
-            return;
+            inventory.setStackAt(index, stack);
         }
-        getCore().updateTileEntity();
+        markStorageChanged();
+    }
+
+    /** Cheap "this block changed" notice: one description packet per tick at most, never a whole inventory push. */
+    private void markStorageChanged() {
+        TileEntityStorageCore core = getCore();
+        if (core != null) {
+            core.updateTileEntity(false);
+        }
     }
 
     @Override
@@ -90,38 +109,15 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
         if (inventory == null) {
             return false;
         }
-
-        int foundIndex = -1;
-        int itemsCount = inventory.inventory.size();
-
-        // Search for existing group of the given item type
-        for (int i = 0; i < itemsCount; i++) {
-            ItemStack group = inventory.inventory.get(i);
-            if (EZInventory.stacksEqual(group, stack)) {
-                foundIndex = i;
-            }
-        }
-
-        // Permit if the destination is a new slot and the item doesn't exist
-        if (index >= inventory.inventory.size()) {
-            return true; // return foundIndex == -1;
-        }
-
-        // Permit if the item eixsts and is in the destination slot
-        if (foundIndex == index) {
+        // A new slot (one past the end) always accepts, otherwise only the slot already holding this type does.
+        if (index >= inventory.slotCount()) {
             return true;
         }
-
-        // If the item doesn't exist, permit if the destination slot is empty
-        if (index == -1) {
-            ItemStack group = inventory.inventory.get(index);
-            if (group == null || group.stackSize == 0) {
-                return true;
-            }
+        if (index < 0) {
+            return false;
         }
-
-        // Permit if the item exists but in another slot
-        return false;
+        ItemStack group = inventory.getStackAt(index);
+        return group != null && EZInventory.stacksEqual(group, stack);
     }
 
     @Override
@@ -135,15 +131,8 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
         if (inventory == null) {
             return false;
         }
-
-        // Check if the slot is empty and if the item does not exist yet
-        if (index >= inventory.inventory.size()) {
-            return false;
-        }
-
-        // The item in the slot needs to be the same as the given item
-        ItemStack theGroup = inventory.inventory.get(index);
-        return theGroup != null && EZInventory.stacksEqual(theGroup, stack);
+        ItemStack group = inventory.getStackAt(index);
+        return group != null && EZInventory.stacksEqual(group, stack);
     }
 
     @Override
@@ -153,12 +142,19 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
 
     @Override
     public int[] getAccessibleSlotsFromSide(int p_94128_1_) {
+        EZInventory inventory = getInventory();
+        int version = inventory == null ? -1 : inventory.getStructureVersion();
         int size = getSizeInventory();
-        int[] slots = new int[size];
-        for (int i = 0; i < size; i++) {
-            slots[i] = i;
+        if (cachedSlots == null || cachedStructureVersion != version || cachedSlotCount != size) {
+            int[] slots = new int[size];
+            for (int i = 0; i < size; i++) {
+                slots[i] = i;
+            }
+            cachedSlots = slots;
+            cachedStructureVersion = version;
+            cachedSlotCount = size;
         }
-        return slots;
+        return cachedSlots;
     }
 
     @Override
@@ -166,7 +162,6 @@ public class TileEntityInventoryProxy extends TileEntityMultiblock implements IS
         ItemStack stack = getStackInSlot(index);
         if (stack != null) {
             setInventorySlotContents(index, null);
-            getCore().updateTileEntity();
         }
         return stack;
     }

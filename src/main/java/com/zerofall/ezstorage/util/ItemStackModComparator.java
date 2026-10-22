@@ -1,12 +1,18 @@
 package com.zerofall.ezstorage.util;
 
 import java.util.Comparator;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 
 import cpw.mods.fml.common.registry.GameData;
 
 public class ItemStackModComparator implements Comparator<ItemStack> {
+
+    /** One sort creates one comparator, so this cache lives exactly as long as the sort it serves. */
+    private final Map<Item, String> modIds = new IdentityHashMap<Item, String>();
 
     @Override
     public int compare(ItemStack o1, ItemStack o2) {
@@ -16,11 +22,24 @@ public class ItemStackModComparator implements Comparator<ItemStack> {
     }
 
     private String getModId(ItemStack stack) {
-        String name = GameData.getItemRegistry()
-            .getNameForObject(stack.getItem());
-        if (name != null && name.contains(":")) {
-            return name.split(":")[0];
+        if (stack == null) {
+            return "minecraft";
         }
-        return "minecraft";
+        Item item = stack.getItem();
+        String cached = modIds.get(item);
+        if (cached != null) {
+            return cached;
+        }
+        String name = GameData.getItemRegistry()
+            .getNameForObject(item);
+        String modId = "minecraft";
+        if (name != null) {
+            int colon = name.indexOf(':');
+            if (colon > 0) {
+                modId = name.substring(0, colon);
+            }
+        }
+        modIds.put(item, modId);
+        return modId;
     }
 }

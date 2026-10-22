@@ -8,8 +8,7 @@ public class ItemStackCountComparator implements Comparator<ItemStack> {
 
     @Override
     public int compare(ItemStack o1, ItemStack o2) {
-        Integer l1 = o1.stackSize;
-        Integer l2 = o2.stackSize;
-        return l2.compareTo(l1);
+        // No boxing: this runs once per comparison, i.e. millions of times for a large storage.
+        return Integer.compare(o2.stackSize, o1.stackSize);
     }
 }

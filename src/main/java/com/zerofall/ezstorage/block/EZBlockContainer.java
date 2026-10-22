@@ -48,7 +48,7 @@ public class EZBlockContainer extends StorageMultiblock implements ITileEntityPr
         boolean enableCraftingGrid = core.hasCraftBox && !IntegrationUtils.isSpectatorMode(playerMP);
         EZStorage.instance.guiHandler.inventoryIds.put(playerMP, inventory.id);
         playerMP.openGui(EZStorage.instance, enableCraftingGrid ? 2 : 1, worldIn, x, y, z);
-        EZStorage.instance.network.sendTo(new MsgStorage(inventory), playerMP);
+        MsgStorage.sendAll(inventory, playerMP);
     }
 
 }

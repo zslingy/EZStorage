@@ -108,7 +108,7 @@ public class ItemPortableStoragePanel extends EZItem implements IBauble, IBauble
                             reference.blockX,
                             reference.blockY,
                             reference.blockZ);
-                        EZStorage.instance.network.sendTo(new MsgStorage(inventory), playerMP);
+                        MsgStorage.sendAll(inventory, playerMP);
                     }
                 }
             }

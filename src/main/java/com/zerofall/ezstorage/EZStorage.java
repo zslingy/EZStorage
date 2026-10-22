@@ -6,6 +6,7 @@ import org.apache.logging.log4j.Logger;
 import com.zerofall.ezstorage.gui.GuiHandler;
 import com.zerofall.ezstorage.network.client.HandlerMsgPickBlockResponse;
 import com.zerofall.ezstorage.network.client.HandlerMsgStorage;
+import com.zerofall.ezstorage.network.client.HandlerMsgStorageDelta;
 import com.zerofall.ezstorage.network.client.MsgBulkImport;
 import com.zerofall.ezstorage.network.client.MsgClearCraftingGrid;
 import com.zerofall.ezstorage.network.client.MsgCraftRecipe;
@@ -28,6 +29,7 @@ import com.zerofall.ezstorage.network.server.HandlerMsgReqOpenInvGui;
 import com.zerofall.ezstorage.network.server.HandlerMsgReqStorage;
 import com.zerofall.ezstorage.network.server.MsgPickBlockResponse;
 import com.zerofall.ezstorage.network.server.MsgStorage;
+import com.zerofall.ezstorage.network.server.MsgStorageDelta;
 import com.zerofall.ezstorage.proxy.CommonProxy;
 
 import cpw.mods.fml.common.Mod;
@@ -84,6 +86,7 @@ public class EZStorage {
         instance.network
             .registerMessage(HandlerMsgPullBookmarkItems.class, MsgPullBookmarkItems.class, d++, Side.SERVER);
         instance.network.registerMessage(HandlerMsgCraftRecipe.class, MsgCraftRecipe.class, d++, Side.SERVER);
+        instance.network.registerMessage(HandlerMsgStorageDelta.class, MsgStorageDelta.class, d++, Side.CLIENT);
     }
 
     @EventHandler

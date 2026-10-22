@@ -18,6 +18,7 @@ public class ContainerStorageCore extends Container {
 
     public EZInventory inventory = new EZInventory();
     public LocalDateTime inventoryUpdateTimestamp = LocalDateTime.now();
+    private boolean viewingInventory;
 
     public ContainerStorageCore(EntityPlayer player, EZInventory inventory) {
         this(player);
@@ -104,9 +105,11 @@ public class ContainerStorageCore extends Container {
             }
             ItemStack stack = this.inventory.getItemsAt(itemIndex, type);
             if (stack != null) {
-                // Shift click
+                // Shift click: merge what fits and keep the remainder in storage instead of
+                // dropping it on the floor (mergeItemStack only reports partial success).
                 if (clickedButton == 0 && mode == 1) {
-                    if (!this.mergeItemStack(stack, this.rowCount() * 9, this.rowCount() * 9 + 36, true)) {
+                    this.mergeItemStack(stack, this.rowCount() * 9, this.rowCount() * 9 + 36, true);
+                    if (stack.stackSize > 0) {
                         this.inventory.input(stack, true);
                     }
                 } else {
@@ -146,8 +149,9 @@ public class ContainerStorageCore extends Container {
             if (extracted == null) {
                 continue;
             }
-            if (!this.mergeItemStack(extracted, this.rowCount() * 9, this.rowCount() * 9 + 36, true)) {
-                this.inventory.input(extracted);
+            this.mergeItemStack(extracted, this.rowCount() * 9, this.rowCount() * 9 + 36, true);
+            if (extracted.stackSize > 0) {
+                this.inventory.input(extracted, true);
             }
             changed = true;
         }
@@ -168,15 +172,41 @@ public class ContainerStorageCore extends Container {
         return 6;
     }
 
+    /**
+     * Runs once per tick on the server for every open container. Registers the viewer (so the inventory starts queueing
+     * deltas) and flushes them - this is what catches changes made outside of a container click, e.g. by a pipe or by
+     * the AE2 integration.
+     */
+    @Override
+    public void detectAndSendChanges() {
+        super.detectAndSendChanges();
+        if (inventory == null) {
+            return;
+        }
+        if (!viewingInventory) {
+            viewingInventory = true;
+            inventory.addSyncViewer();
+        }
+        EZInventoryManager.sendToClients(inventory);
+    }
+
     @Override
     public void onContainerClosed(EntityPlayer playerIn) {
         super.onContainerClosed(playerIn);
         if (!playerIn.worldObj.isRemote) {
+            if (viewingInventory) {
+                viewingInventory = false;
+                inventory.removeSyncViewer();
+            }
             this.inventory.sort();
-            EZInventoryManager.sendToClients(inventory);
+            // Sorting reorders the list, which the deltas cannot express - but only the remaining viewers care.
+            if (this.inventory.hasSyncViewers()) {
+                EZInventoryManager.sendSnapshot(inventory);
+            }
         }
     }
 
+    /** Move the player's hotbar (0-8) or main inventory (9-35) into storage. */
     public void importPlayerInventory(EntityPlayer player, boolean hotbarOnly) {
         InventoryPlayer inv = player.inventory;
         int start = hotbarOnly ? 0 : 9;

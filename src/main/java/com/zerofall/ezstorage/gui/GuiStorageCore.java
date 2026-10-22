@@ -14,6 +14,7 @@ import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.client.gui.inventory.GuiContainer;
 import net.minecraft.client.renderer.RenderHelper;
+import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.inventory.Slot;
 import net.minecraft.item.ItemStack;
@@ -23,6 +24,7 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.StatCollector;
 import net.minecraft.world.World;
 
+import org.lwjgl.input.Keyboard;
 import org.lwjgl.input.Mouse;
 import org.lwjgl.opengl.GL11;
 
@@ -102,8 +104,12 @@ public class GuiStorageCore extends GuiContainer {
     protected GuiTextField searchField;
     protected ItemStack mouseOverItem;
     protected List<ItemStack> filteredList = new ArrayList<ItemStack>();
-    protected LocalDateTime inventoryUpdateTimestamp;
-    protected boolean needFullUpdate;
+    /** Last inventory structure version this gui rendered, see {@link #updateScreen()}. */
+    private int seenStructureVersion = -1;
+    private int seenContentVersion = -1;
+    private int resortCountdown = RESORT_INTERVAL;
+    private static final int RESORT_INTERVAL = 10;
+    private DecimalFormat cachedFormatter;
 
     private boolean guiWasOpen = false;
 
@@ -156,7 +162,7 @@ public class GuiStorageCore extends GuiContainer {
             sideButtons[i].y = by + i * BTN_STRIDE;
         }
 
-        updateFilteredItems(true);
+        updateFilteredItems();
     }
 
     @Override
@@ -202,7 +208,7 @@ public class GuiStorageCore extends GuiContainer {
             this.searchField.setFocused(true);
             currentScroll = 0;
             scrollRow = 0;
-            updateFilteredItems(true);
+            updateFilteredItems();
             if (ModIds.NEI.isLoaded()
                 && (currentSearchMode == SearchMode.NEI_SYNC || currentSearchMode == SearchMode.NEI_STANDARD)) {
                 setNeiSearchText(displayName);
@@ -272,17 +278,17 @@ public class GuiStorageCore extends GuiContainer {
             case BTN_SORT_MODE:
                 currentSortMode = currentSortMode.next();
                 saveSettingsToConfig();
-                updateFilteredItems(true);
+                updateFilteredItems();
                 break;
             case BTN_SORT_ORDER:
                 currentSortOrder = currentSortOrder.next();
                 saveSettingsToConfig();
-                updateFilteredItems(true);
+                updateFilteredItems();
                 break;
             case BTN_SEARCH_MODE:
                 currentSearchMode = currentSearchMode.next();
                 saveSettingsToConfig();
-                updateFilteredItems(true);
+                updateFilteredItems();
                 break;
             case BTN_SAVE_SEARCH:
                 saveSearch = !saveSearch;
@@ -370,7 +376,10 @@ public class GuiStorageCore extends GuiContainer {
     protected void drawGuiContainerForegroundLayer(int mouseX, int mouseY) {
         super.drawGuiContainerForegroundLayer(mouseX, mouseY);
         handleScrolling(mouseX, mouseY);
-        DecimalFormat formatter = new DecimalFormat("#,###");
+        DecimalFormat formatter = this.cachedFormatter;
+        if (formatter == null) {
+            formatter = this.cachedFormatter = new DecimalFormat("#,###");
+        }
         String totalCount = formatter.format(getInventory().getTotalCount());
         String max = formatter.format(getInventory().maxItems);
         String amount = StatCollector.translateToLocalFormatted("hud.msg.ezstorage.amount_count", totalCount, max);
@@ -398,6 +407,8 @@ public class GuiStorageCore extends GuiContainer {
         this.ezRenderer.zLevel = 200.0F;
 
         boolean finished = false;
+        // Vanilla sets this once per frame; doing it per slot was 54 redundant glEnable/glColor sequences.
+        RenderHelper.enableGUIStandardItemLighting();
         for (int i = 0; i < this.rowsVisible(); i++) {
             x = 8;
             for (int j = 0; j < 9; j++) {
@@ -412,7 +423,6 @@ public class GuiStorageCore extends GuiContainer {
                     FontRenderer font = stack.getItem()
                         .getFontRenderer(stack);
                     if (font == null) font = fontRendererObj;
-                    RenderHelper.enableGUIStandardItemLighting();
                     itemRender.renderItemAndEffectIntoGUI(font, this.mc.getTextureManager(), stack, x, y);
                     ezRenderer.renderItemOverlayIntoGUI(font, stack, x, y, "" + stack.stackSize);
                 }
@@ -446,12 +456,17 @@ public class GuiStorageCore extends GuiContainer {
             }
         }
 
-        // Bulk import: check player slot index (configurable key, default SPACE)
-        // 0-8 = hotbar, 9-35 = main inventory
-        if (mouseButton == 0 && EZStorage.proxy.eventHandler.keybindBulkAction.isPressed()) {
-            Slot slot = getSlotUnderMouse(mouseX, mouseY);
-            if (slot != null && slot.getHasStack()) {
-                int slotIndex = slot.getSlotIndex();
+        // Bulk store: hold the bulk key (default SPACE) and left-click a player inventory slot.
+        // A hotbar slot stores only the hotbar, a main inventory slot stores only the main inventory.
+        boolean bulkKeyHeld = isBulkActionKeyHeld();
+        if (bulkKeyHeld && mouseButton == 0) {
+            Slot playerSlot = getSlotUnderMouse(mouseX, mouseY);
+            // The storage grid is backed by placeholder slots whose indices (0-53) overlap the
+            // player's hotbar/main inventory indices, so compare the backing inventory instead.
+            if (playerSlot != null && playerSlot.getHasStack()
+                && this.mc.thePlayer != null
+                && playerSlot.inventory == this.mc.thePlayer.inventory) {
+                int slotIndex = playerSlot.getSlotIndex();
                 if (slotIndex >= 0 && slotIndex < 9) {
                     EZStorage.instance.network.sendToServer(new MsgBulkImport(true));
                     return;
@@ -472,7 +487,7 @@ public class GuiStorageCore extends GuiContainer {
             } else if (mouseButton == 1) { // Right click to clear
                 searchText = "";
                 this.searchField.setText("");
-                updateFilteredItems(true);
+                updateFilteredItems();
                 if (ModIds.NEI.isLoaded()
                     && (currentSearchMode == SearchMode.NEI_SYNC || currentSearchMode == SearchMode.NEI_STANDARD)) {
                     setNeiSearchText("");
@@ -489,7 +504,7 @@ public class GuiStorageCore extends GuiContainer {
         Integer slot = getSlotAt(mouseX, mouseY);
         if (slot != null) {
             int mode;
-            if (EZStorage.proxy.eventHandler.keybindBulkAction.isPressed()) {
+            if (bulkKeyHeld) {
                 mode = 2;
             } else if (GuiScreen.isShiftKeyDown()) {
                 mode = 1;
@@ -508,18 +523,43 @@ public class GuiStorageCore extends GuiContainer {
                 }
             }
             EZStorage.instance.network.sendToServer(new MsgInvSlotClicked(index, mouseButton, mode));
-            ContainerStorageCore container = (ContainerStorageCore) this.inventorySlots;
-            container.customSlotClick(index, mouseButton, mode, this.mc.thePlayer);
-            // Refresh filtered list after client-side prediction,
-            // otherwise the GUI shows stale items that have already been
-            // extracted (especially noticeable when extracting all with
-            // space+click).
-            container.inventoryUpdateTimestamp = LocalDateTime.now();
+            // Predict the click locally. This is not just a latency nicety: the cursor stack ("held item") is not one
+            // of the container slots, so nothing in the slot sync would ever tell this client what the server put on
+            // its cursor. Without the prediction the item would leave the terminal view (the delta removes that slot)
+            // and never show up on the cursor, and the next click - made with what the client still thinks is an empty
+            // cursor - would make the server overwrite and therefore destroy it.
+            // Applying the delta on top is safe: deltas carry absolute counts addressed by slot id, so a re-apply is
+            // idempotent, and a locally created entry is replaced by the server's slot id with the same item key.
+            if (this.mc.thePlayer != null && this.inventorySlots instanceof ContainerStorageCore container) {
+                container.customSlotClick(index, mouseButton, mode, this.mc.thePlayer);
+            }
             wantFocus = false;
         }
 
         this.searchField.setFocused(wantFocus);
         super.mouseClicked(mouseX, mouseY, mouseButton);
+    }
+
+    /**
+     * Whether the bulk-action key is currently held down.
+     * <p>
+     * {@link KeyBinding#isPressed()} / {@link KeyBinding#getIsKeyPressed()} cannot be used from a
+     * container screen: Minecraft#runTick only polls the LWJGL key events (and therefore only calls
+     * KeyBinding#onTick) while {@code currentScreen == null || currentScreen.allowUserInput}, and a
+     * GuiContainer keeps {@code allowUserInput} false. GuiScreen#isShiftKeyDown() queries the live
+     * key state for exactly this reason, so do the same here.
+     */
+    private boolean isBulkActionKeyHeld() {
+        KeyBinding keyBinding = EZStorage.proxy.eventHandler.keybindBulkAction;
+        if (keyBinding == null) {
+            return false;
+        }
+        int keyCode = keyBinding.getKeyCode();
+        if (keyCode < 0) {
+            // Mouse buttons are stored as -100 - button (see Minecraft#runTick).
+            return Mouse.isButtonDown(keyCode + 100);
+        }
+        return keyCode != Keyboard.KEY_NONE && Keyboard.isKeyDown(keyCode);
     }
 
     private boolean isOverSearchField(int mouseX, int mouseY) {
@@ -631,7 +671,7 @@ public class GuiStorageCore extends GuiContainer {
             if (this.searchField.isFocused() && this.searchField.textboxKeyTyped(typedChar, keyCode)) {
                 currentScroll = 0;
                 scrollRow = 0;
-                updateFilteredItems(true);
+                updateFilteredItems();
                 if (ModIds.NEI.isLoaded()
                     && (currentSearchMode == SearchMode.NEI_SYNC || currentSearchMode == SearchMode.NEI_STANDARD)) {
                     setNeiSearchText(this.searchField.getText());
@@ -645,11 +685,31 @@ public class GuiStorageCore extends GuiContainer {
 
     @Override
     public void updateScreen() {
-        if (inventorySlots instanceof ContainerStorageCore container
-            && (inventoryUpdateTimestamp != container.inventoryUpdateTimestamp
-                || (needFullUpdate && !GuiScreen.isShiftKeyDown()))) {
-            inventoryUpdateTimestamp = container.inventoryUpdateTimestamp;
-            updateFilteredItems(false);
+        if (inventorySlots instanceof ContainerStorageCore container && container.inventory != null) {
+            // Counts need no view work at all: filteredList holds live references into the inventory, so it is already
+            // up to date. Only a type appearing or disappearing requires a rebuild - and that is at most once per
+            // frame instead of the old full re-sort per received packet.
+            int structure = container.inventory.getStructureVersion();
+            if (structure != seenStructureVersion) {
+                seenStructureVersion = structure;
+                seenContentVersion = container.inventory.getContentVersion();
+                updateFilteredItems();
+                resortCountdown = RESORT_INTERVAL;
+            } else if (currentSortMode == SortMode.AMOUNT) {
+                // Amount is the only sort key a count change can move. Re-sorting on every received change is what
+                // made the old gui stutter, so coalesce bursts into at most one sort per RESORT_INTERVAL ticks.
+                int content = container.inventory.getContentVersion();
+                if (content != seenContentVersion && resortCountdown <= 0) {
+                    // Consume the version only when the sort actually happens, otherwise a burst of changes would
+                    // silently swallow the final re-sort.
+                    seenContentVersion = content;
+                    sortFilteredList();
+                    resortCountdown = RESORT_INTERVAL;
+                }
+            }
+            if (resortCountdown > 0) {
+                resortCountdown--;
+            }
         }
 
         // Sync NEI text block
@@ -663,7 +723,7 @@ public class GuiStorageCore extends GuiContainer {
                     searchText = neiText;
                     currentScroll = 0;
                     scrollRow = 0;
-                    updateFilteredItems(true);
+                    updateFilteredItems();
                 }
             }
         }
@@ -671,44 +731,15 @@ public class GuiStorageCore extends GuiContainer {
         super.updateScreen();
     }
 
-    private void updateFilteredItems(boolean forceFullUpdate) {
+    private void updateFilteredItems() {
         searchText = this.searchField.getText()
             .trim();
 
-        if (forceFullUpdate || !GuiScreen.isShiftKeyDown()) {
-            filteredList.clear();
-            synchronized (getInventory().inventory) {
-                filterItems(searchText, getInventory().inventory);
-            }
-            sortFilteredList();
-            needFullUpdate = false;
-        } else {
-            List<ItemStack> listNewStacks = new ArrayList<ItemStack>();
-            synchronized (getInventory().inventory) {
-                for (ItemStack stackSrc : getInventory().inventory) {
-                    boolean found = false;
-                    for (ItemStack stackDest : filteredList) {
-                        if (EZInventory.stacksEqual(stackDest, stackSrc)) {
-                            stackDest.stackSize = stackSrc.stackSize;
-                            found = true;
-                        }
-                    }
-                    if (!found) listNewStacks.add(stackSrc);
-                }
-                for (ItemStack stackDest : filteredList) {
-                    boolean found = false;
-                    for (ItemStack stackSrc : getInventory().inventory) {
-                        if (EZInventory.stacksEqual(stackDest, stackSrc)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) stackDest.stackSize = 0;
-                }
-            }
-            if (!listNewStacks.isEmpty()) filterItems(searchText, listNewStacks);
-            needFullUpdate = true;
+        filteredList.clear();
+        synchronized (getInventory().inventory) {
+            filterItems(searchText, getInventory().inventory);
         }
+        sortFilteredList();
     }
 
     private void sortFilteredList() {

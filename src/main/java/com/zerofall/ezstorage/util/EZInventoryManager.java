@@ -6,6 +6,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map.Entry;
 import java.util.UUID;
 
@@ -22,6 +23,7 @@ import com.zerofall.ezstorage.EZStorage;
 import com.zerofall.ezstorage.Reference;
 import com.zerofall.ezstorage.container.ContainerStorageCore;
 import com.zerofall.ezstorage.network.server.MsgStorage;
+import com.zerofall.ezstorage.network.server.MsgStorageDelta;
 import com.zerofall.ezstorage.tileentity.TileEntityStorageCore;
 
 public class EZInventoryManager {
@@ -196,6 +198,10 @@ public class EZInventoryManager {
         sendToClients(inventory, true);
     }
 
+    /**
+     * Flushes the queued deltas of {@code inventory} to every player currently looking at it. Only the slots that
+     * changed travel now; the full inventory is sent once, when the gui is opened.
+     */
     public static void sendToClients(EZInventory inventory, boolean checkTileEntities) {
         if (inventory == null || !inventories.contains(inventory)) {
             return;
@@ -206,12 +212,18 @@ public class EZInventoryManager {
             return;
         }
 
+        List<EZInventory.SyncEntry> drained = inventory.drainSync();
+        if (drained == null) {
+            return;
+        }
+
+        MsgStorageDelta msg = new MsgStorageDelta(inventory.id, drained);
         for (WorldServer world : server.worldServers) {
             // Send inventory packet to players with open Storage Core gui
             for (EntityPlayer player : world.playerEntities) {
                 if (player.openContainer instanceof ContainerStorageCore container && container.inventory == inventory
                     && player instanceof EntityPlayerMP playerMP) {
-                    EZStorage.instance.network.sendTo(new MsgStorage(inventory), playerMP);
+                    EZStorage.instance.network.sendTo(msg, playerMP);
                 }
             }
 
@@ -220,6 +232,32 @@ public class EZInventoryManager {
                 for (TileEntity tileEntity : world.loadedTileEntityList) {
                     if (tileEntity instanceof TileEntityStorageCore core && core.getInventory() == inventory) {
                         core.updateTileEntity(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends the complete inventory to every viewer. Only needed when the data cannot be expressed as a delta (first
+     * open, or a re-sort), never on a plain count change.
+     */
+    public static void sendSnapshot(EZInventory inventory) {
+        if (inventory == null || !inventories.contains(inventory)) {
+            return;
+        }
+        MinecraftServer server = MinecraftServer.getServer();
+        if (server == null) {
+            return;
+        }
+        inventory.drainSync();
+        List<MsgStorage> parts = MsgStorage.createAll(inventory);
+        for (WorldServer world : server.worldServers) {
+            for (EntityPlayer player : world.playerEntities) {
+                if (player.openContainer instanceof ContainerStorageCore container && container.inventory == inventory
+                    && player instanceof EntityPlayerMP playerMP) {
+                    for (MsgStorage part : parts) {
+                        EZStorage.instance.network.sendTo(part, playerMP);
                     }
                 }
             }

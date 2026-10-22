@@ -5,6 +5,7 @@ import io.netty.buffer.ByteBuf;
 
 public class MsgBulkImport implements IMessage {
 
+    /** true = hotbar only (slots 0-8), false = main inventory only (slots 9-35). */
     public boolean hotbarOnly;
 
     public MsgBulkImport() {}

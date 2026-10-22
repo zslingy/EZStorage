@@ -27,6 +27,15 @@ public class ContainerStorageCoreCrafting extends ContainerStorageCore {
     public IInventory craftResult = new InventoryCraftResult();
     private World worldObj;
 
+    /** Non-zero while a bulk grid change runs; recipe lookups are deferred to {@link #endBatch()}. */
+    private int batchDepth;
+    /** Set when a grid change happened while batching, so {@link #endBatch()} knows to recompute. */
+    private boolean craftResultDirty;
+    /** The nine grid stacks {@link #lastResult} was computed from, or {@code null} when that cache is cold. */
+    private final ItemStack[] lastGrid = new ItemStack[9];
+    private ItemStack lastResult;
+    private boolean lastGridValid;
+
     public ContainerStorageCoreCrafting(EntityPlayer player, World world, EZInventory inventory) {
         this(player, world);
         this.inventory = inventory;
@@ -61,11 +70,89 @@ public class ContainerStorageCoreCrafting extends ContainerStorageCore {
         this.onCraftMatrixChanged(this.craftMatrix);
     }
 
+    /**
+     * {@link InventoryCrafting} calls this once for every changed grid slot, and taking a craft result clears all nine
+     * slots one at a time - so one craft used to cost eighteen full scans of the recipe table, and one shift click up
+     * to sixty-four crafts. While {@link #beginBatch() batching} this only flags the result as stale; the recompute
+     * happens once, in {@link #endBatch()}, from the final grid state.
+     */
     public void onCraftMatrixChanged(IInventory inventoryIn) {
-        this.craftResult.setInventorySlotContents(
-            0,
-            CraftingManager.getInstance()
-                .findMatchingRecipe(this.craftMatrix, this.worldObj));
+        if (batchDepth > 0) {
+            craftResultDirty = true;
+            return;
+        }
+        updateCraftResult();
+    }
+
+    private void beginBatch() {
+        batchDepth++;
+    }
+
+    private void endBatch() {
+        if (--batchDepth == 0 && craftResultDirty) {
+            updateCraftResult();
+        }
+    }
+
+    private void updateCraftResult() {
+        craftResultDirty = false;
+        if (gridIsEmpty()) {
+            // A recipe always consumes something, so an empty grid never matches. Every craft iteration passes through
+            // this state and scanning the whole recipe table for it would be pure waste - and the cached signature is
+            // deliberately left alone so that the refilled grid can still hit it below.
+            this.craftResult.setInventorySlotContents(0, null);
+            return;
+        }
+        if (lastGridValid && gridUnchanged()) {
+            this.craftResult.setInventorySlotContents(0, lastResult == null ? null : lastResult.copy());
+            return;
+        }
+        ItemStack result = CraftingManager.getInstance()
+            .findMatchingRecipe(this.craftMatrix, this.worldObj);
+        snapshotGrid();
+        lastResult = result == null ? null : result.copy();
+        lastGridValid = true;
+        this.craftResult.setInventorySlotContents(0, result);
+    }
+
+    private boolean gridIsEmpty() {
+        for (int i = 0; i < 9; i++) {
+            if (this.craftMatrix.getStackInSlot(i) != null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Refilling the grid after a craft restores exactly what the previous craft started from, so from the second
+     * iteration on the lookup is always a cache hit. The result is a pure function of the nine grid stacks, so
+     * comparing those is enough.
+     */
+    private boolean gridUnchanged() {
+        for (int i = 0; i < 9; i++) {
+            ItemStack current = this.craftMatrix.getStackInSlot(i);
+            ItemStack previous = lastGrid[i];
+            if (current == null || previous == null) {
+                if (current != previous) {
+                    return false;
+                }
+                continue;
+            }
+            if (current.stackSize != previous.stackSize || !EZInventory.stacksEqual(current, previous)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void snapshotGrid() {
+        for (int i = 0; i < 9; i++) {
+            ItemStack current = this.craftMatrix.getStackInSlot(i);
+            // Deep copy on purpose: a mod may edit the tag of the stack sitting in the grid in place, and a shared tag
+            // would then compare equal against itself and wrongly report the grid as unchanged.
+            lastGrid[i] = current == null ? null : current.copy();
+        }
     }
 
     // Shift clicking
@@ -106,11 +193,26 @@ public class ContainerStorageCoreCrafting extends ContainerStorageCore {
                     // It merged! grab another
                     crafted += resultStack.stackSize;
                     slotObject.onSlotChange(slotStack, resultStack);
-                    slotObject.onPickupFromSlot(playerIn, slotStack);
+
+                    // Consuming the result empties the grid and refilling it restores the same contents, so both halves
+                    // run batched: the recipe lookup ends up happening twice per crafted item instead of once per
+                    // touched slot. The result slot has to be current straight after the pickup though, because the
+                    // loop reads it to decide whether another craft is possible.
+                    beginBatch();
+                    try {
+                        slotObject.onPickupFromSlot(playerIn, slotStack);
+                    } finally {
+                        endBatch();
+                    }
 
                     if (slotObject.getStack() == null || !original.isItemEqual(slotObject.getStack())) {
-                        if (tryToPopulateCraftingGrid(recipe, playerIn, false)) {
-                            hasChanges = true;
+                        beginBatch();
+                        try {
+                            if (tryToPopulateCraftingGrid(recipe, playerIn, false)) {
+                                hasChanges = true;
+                            }
+                        } finally {
+                            endBatch();
                         }
                     }
                 }
@@ -145,8 +247,16 @@ public class ContainerStorageCoreCrafting extends ContainerStorageCore {
                             recipe[i] = new ItemStack[] { this.craftMatrix.getStackInSlot(i) };
                         }
                         ItemStack result = super.slotClick(slotId, clickedButton, mode, playerIn);
-                        if (result != null && tryToPopulateCraftingGrid(recipe, playerIn, false)) {
-                            EZInventoryManager.sendToClients(inventory);
+                        if (result != null) {
+                            // Refilling touches up to nine slots, i.e. nine recipe lookups for one craft.
+                            beginBatch();
+                            try {
+                                if (tryToPopulateCraftingGrid(recipe, playerIn, false)) {
+                                    EZInventoryManager.sendToClients(inventory);
+                                }
+                            } finally {
+                                endBatch();
+                            }
                         }
                         return result;
                     }
@@ -299,20 +409,27 @@ public class ContainerStorageCoreCrafting extends ContainerStorageCore {
     }
 
     public static ItemStack getMatchingItemFromStorage(EZInventory inventory, ItemStack recipeItem, int size) {
+        if (inventory == null || recipeItem == null || recipeItem.getItem() == null || size <= 0) {
+            return null;
+        }
         synchronized (inventory.inventory) {
-            for (int i = 0; i < inventory.inventory.size(); i++) {
-                ItemStack group = inventory.inventory.get(i);
+            // Any stack this would accept necessarily has the same Item (the ore dictionary check and stacksEqual both
+            // compare that first), so the per-item bucket is a complete candidate set - no full scan with an NBT
+            // comparison per stored type needed.
+            java.util.List<ItemStack> candidates = inventory.getStacksForItem(recipeItem.getItem());
+            if (candidates == null) {
+                return null;
+            }
+            for (int i = 0; i < candidates.size(); i++) {
+                ItemStack group = candidates.get(i);
+                if (group.stackSize < size) {
+                    continue;
+                }
                 if (isRecipeItemValid(recipeItem, group)) {
-                    if (group.stackSize >= size) {
-                        ItemStack stack = group.copy();
-                        stack.stackSize = size;
-                        group.stackSize -= size;
-                        if (group.stackSize <= 0) {
-                            inventory.inventory.remove(i);
-                        }
-                        inventory.setHasChanges();
-                        return stack;
-                    }
+                    // Route the removal through the inventory so its index, cached total and pending deltas stay
+                    // correct - this used to poke the raw list and silently desync all three. Returns immediately:
+                    // the removal may drop the very entry the bucket is iterating over.
+                    return inventory.takeFrom(group, size);
                 }
             }
         }
